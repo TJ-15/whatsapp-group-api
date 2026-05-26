@@ -255,7 +255,7 @@ app.post("/add-to-group", async (req, res) => {
       error: err.message
     });
   }
-});n
+})
 
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
