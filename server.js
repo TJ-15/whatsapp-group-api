@@ -216,6 +216,47 @@ Team YourEA 🚀`
   }
 });
 
+app.post("/add-to-group", async (req, res) => {
+  try {
+    const { group_id, mobile } = req.body;
+
+    if (!group_id || !mobile) {
+      return res.status(400).json({
+        success: false,
+        error: "group_id and mobile are required"
+      });
+    }
+
+    if (!sock || !sock.user) {
+      return res.status(400).json({
+        success: false,
+        error: "WhatsApp not connected"
+      });
+    }
+
+    const cleanMobile = mobile.toString().replace(/\D/g, "");
+    const jid = `91${cleanMobile}@s.whatsapp.net`;
+
+    const result = await sock.groupParticipantsUpdate(
+      group_id,
+      [jid],
+      "add"
+    );
+
+    return res.json({
+      success: true,
+      message: "User added to group",
+      result
+    });
+
+  } catch (err) {
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
+});n
+
 app.listen(PORT, () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
