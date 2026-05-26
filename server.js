@@ -1,236 +1,166 @@
 const express = require("express");
+const cors = require("cors");
+const qrcode = require("qrcode-terminal");
+
 const {
   default: makeWASocket,
   useMultiFileAuthState,
   fetchLatestBaileysVersion
 } = require("@whiskeysockets/baileys");
 
-const { createClient } =
-require("@supabase/supabase-js");
+const { createClient } = require("@supabase/supabase-js");
 
 const app = express();
+
+app.use(cors());
 app.use(express.json());
 
-// Supabase Config
+const PORT = process.env.PORT || 3000;
+
 const supabase = createClient(
-  "https://hqurzlfogskyagkiyhpi.supabase.co",
-  "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhxdXJ6bGZvZ3NreWFna2l5aHBpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNzM2ODQsImV4cCI6MjA5NDg0OTY4NH0.QSvjI2a5kunltdp3Om9HvC4F16ezPnVHASjaY9_T1Q0"
+ SUPABASE_URL = "https://hqurzlfogskyagkiyhpi.supabase.co",
+  SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhxdXJ6bGZvZ3NreWFna2l5aHBpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNzM2ODQsImV4cCI6MjA5NDg0OTY4NH0.QSvjI2a5kunltdp3Om9HvC4F16ezPnVHASjaY9_T1Q0"
 );
 
 let sock;
 
-// WhatsApp Connect
+// WhatsApp connect
 async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState("auth_info");
 
-  const { state, saveCreds } =
-    await useMultiFileAuthState(
-      "auth_info"
-    );
-
-  const { version } =
-    await fetchLatestBaileysVersion();
+  const { version } = await fetchLatestBaileysVersion();
 
   sock = makeWASocket({
     version,
-    auth: state
+    auth: state,
+    printQRInTerminal: false,
+    browser: ["Windows", "Chrome", "1.0.0"]
   });
 
-  sock.ev.on(
-    "creds.update",
-    saveCreds
-  );
+  sock.ev.on("creds.update", saveCreds);
 
-  sock.ev.on(
-    "connection.update",
-    ({ connection }) => {
-
-      if (
-        connection === "open"
-      ) {
-        console.log(
-          "✅ WhatsApp Connected"
-        );
-      }
+  sock.ev.on("connection.update", ({ connection, qr }) => {
+    if (qr) {
+      console.log("📱 Scan this QR:");
+      qrcode.generate(qr, { small: true });
     }
-  );
+
+    if (connection === "open") {
+      console.log("✅ WhatsApp Connected");
+    }
+
+    if (connection === "close") {
+      console.log("❌ WhatsApp Disconnected. Reconnecting...");
+      startBot();
+    }
+  });
 }
 
 startBot();
 
-// Home Route
 app.get("/", (req, res) => {
   res.send("Server Working ✅");
 });
 
-// Create Group Route
-app.get(
-  "/create-group",
-  async (req, res) => {
+// Create WhatsApp group after registration
+app.post("/create-group", async (req, res) => {
+  let userId = req.body.user_id;
 
-    try {
+  try {
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "user_id is required"
+      });
+    }
 
-      // Fetch latest new user
-      const {
-        data,
-        error
-      } = await supabase
-        .from("users")
-        .select("*")
-        .is(
-          "wa_group_created",
-          null
-        )
-        .order(
-          "created_at",
-          {
-            ascending: false
-          }
-        )
-        .limit(1);
+    if (!sock || !sock.user) {
+      return res.status(400).json({
+        success: false,
+        error: "WhatsApp not connected. Please scan QR first."
+      });
+    }
 
-      console.log(
-        "User Data:",
-        data
-      );
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", userId)
+      .single();
 
-      if (
-        error ||
-        !data.length
-      ) {
-        return res.json({
-          message:
-            "No new users found"
-        });
+    if (userError || !user) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found"
+      });
+    }
+
+    const userName = user.name || user["Full name"] || "User";
+    const phone = user.Mobile || user.mobile || user.phone;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        error: "User phone number missing"
+      });
+    }
+
+    if (user.wa_group_created === true) {
+      return res.json({
+        success: true,
+        message: "Group already created",
+        group_id: user.wa_group_id,
+        group_name: user.wa_group_name
+      });
+    }
+
+    const { data: membersData, error: memberError } = await supabase
+      .from("whatsapp_members")
+      .select("*")
+      .eq("is_active", true);
+
+    if (memberError) {
+      console.log("Member fetch error:", memberError.message);
+    }
+
+    const teamMembers = (membersData || [])
+      .filter(member => member.mobile)
+      .map(member => {
+        const number = member.mobile.toString().replace(/\D/g, "");
+        return `91${number}@s.whatsapp.net`;
+      });
+
+    const cleanUserPhone = phone.toString().replace(/\D/g, "");
+    const userPhone = `91${cleanUserPhone}@s.whatsapp.net`;
+
+    const allMembers = [...teamMembers, userPhone];
+    const uniqueMembers = [...new Set(allMembers)];
+
+    const validParticipants = [];
+
+    for (const jid of uniqueMembers) {
+      const number = jid.split("@")[0];
+      const check = await sock.onWhatsApp(number);
+
+      if (check && check.length) {
+        validParticipants.push(jid);
+      } else {
+        console.log("❌ Invalid WhatsApp:", jid);
       }
+    }
 
-      const user =
-        data[0];
+    if (validParticipants.length < 1) {
+      return res.status(400).json({
+        success: false,
+        error: "No valid WhatsApp participants found"
+      });
+    }
 
-      const userName =
-        user.name;
+    const groupName = `YourEA - ${userName}`;
 
-      const phone =
-        user.Mobile;
+    const group = await sock.groupCreate(groupName, validParticipants);
 
-      if (!phone) {
-        return res.json({
-          error:
-            "Phone number missing"
-        });
-      }
-
-      if (!sock?.user) {
-        return res.json({
-          error:
-            "WhatsApp not connected"
-        });
-      }
-
-      // Fetch Team Members from Supabase
-      // Fetch Team Members
-const {
-  data: membersData,
-  error: memberError
-} = await supabase
-  .from("whatsapp_members")
-  .select("*")
-  .eq(
-    "is_active",
-    true
-  );
-
-  console.log(
-  "Members Data:",
-  membersData
-);
-
-console.log(
-  "Member Error:",
-  memberError
-);
-
-if (memberError) {
-  console.log(
-    "Member Error:",
-    memberError
-  );
-}
-
-// Team members numbers
-const teamMembers =
-  (membersData || [])
-  .map(member =>
-    `91${member.mobile.replace(/\D/g, "")}@s.whatsapp.net`
-  );
-
-// Registered user
-const userPhone =
-  `91${phone.replace(/\D/g, "")}@s.whatsapp.net`;
-
-// Combine all members
-const allMembers = [
-  ...teamMembers,
-  userPhone
-];
-
-// Remove duplicate numbers
-const uniqueMembers =
-  [...new Set(allMembers)];
-
-console.log(
-  "Before Validation:",
-  uniqueMembers
-);
-
-
-// Validate WhatsApp numbers
-const validParticipants = [];
-
-for (const jid of uniqueMembers) {
-
-  const number =
-    jid.split("@")[0];
-
-  const check =
-    await sock.onWhatsApp(number);
-
-  if (
-    check &&
-    check.length
-  ) {
-    validParticipants.push(
-      jid
-    );
-  } else {
-    console.log(
-      "❌ Invalid WhatsApp:",
-      jid
-    );
-  }
-}
-
-console.log(
-  "Valid Members:",
-  validParticipants
-);
-
-// Create Group
-const group =
-  await sock.groupCreate(
-    `YourEA - ${userName}`,
-    validParticipants
-  );
-
-console.log(
-  "✅ Group Created:",
-  group
-);
-      // Send Welcome Message
-      await sock.sendMessage(
-        group.id,
-        {
-          text:
-`Hi ${userName} 👋
+    await sock.sendMessage(group.id, {
+      text: `Hi ${userName} 👋
 
 Welcome to YourEA!
 
@@ -242,89 +172,50 @@ This group will be used for:
 ✅ Communication
 
 Team YourEA 🚀`
-        }
-      );
+    });
 
-      console.log(
-        "✅ Welcome Message Sent"
-      );
+    const { error: updateError } = await supabase
+      .from("users")
+      .update({
+        wa_group_id: group.id,
+        wa_group_name: groupName,
+        wa_group_created: true,
+        wa_group_created_at: new Date().toISOString(),
+        wa_welcome_sent: true,
+        wa_last_error: null
+      })
+      .eq("id", user.id);
 
-      // Update Supabase
-      const {
-        data: updateData,
-        error: updateError
-      } = await supabase
-        .from("users")
-        .update({
-          wa_group_id:
-            group.id,
+    if (updateError) {
+      console.log("Update error:", updateError.message);
+    }
 
-          wa_group_name:
-            `YourEA - ${userName}`,
+    return res.json({
+      success: true,
+      message: "Group created successfully",
+      group_id: group.id,
+      group_name: groupName
+    });
 
-          wa_group_created:
-            true,
+  } catch (err) {
+    console.log("Create group error:", err.message);
 
-          wa_group_created_at:
-            new Date().toISOString(),
-
-          wa_welcome_sent:
-            true,
-
-          wa_last_error:
-            null
-        })
-        .eq(
-          "id",
-          user.id
-        )
-        .select();
-
-      console.log(
-        "Updated:",
-        updateData
-      );
-
-      console.log(
-        "Update Error:",
-        updateError
-      );
-
-      res.json({
-        success: true,
-        message:
-          "Group created & DB updated",
-        group:
-          `YourEA - ${userName}`
-      });
-
-    } catch (err) {
-
-      console.log(
-        "Error:",
-        err
-      );
-
-      // Save error in DB
+    if (userId) {
       await supabase
         .from("users")
         .update({
-          wa_last_error:
-            err.message
-        });
-
-      res.status(500).json({
-        error:
-          err.message
-      });
+          wa_last_error: err.message
+        })
+        .eq("id", userId);
     }
+
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
-);
-app.listen(
-  3000,
-  () => {
-    console.log(
-      "🚀 Server running on 3000"
-    );
-  }
-);
+});
+
+app.listen(PORT, () => {
+  console.log(`🚀 Server running on port ${PORT}`);
+});
