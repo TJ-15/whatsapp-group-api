@@ -18,10 +18,12 @@ const AUTH_DIR = process.env.AUTH_DIR || "./auth_info";
 const app = express();
 app.use(cors());
 app.use(express.json());
-const supabase = createClient(
- SUPABASE_URL = "https://hqurzlfogskyagkiyhpi.supabase.co",
-  SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhxdXJ6bGZvZ3NreWFna2l5aHBpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNzM2ODQsImV4cCI6MjA5NDg0OTY4NH0.QSvjI2a5kunltdp3Om9HvC4F16ezPnVHASjaY9_T1Q0"
-);
+import { createClient } from "@supabase/supabase-js";
+
+const SUPABASE_URL = "https://hqurzlfogskyagkiyhpi.supabase.co";
+const SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhxdXJ6bGZvZ3NreWFna2l5aHBpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNzM2ODQsImV4cCI6MjA5NDg0OTY4NH0.QSvjI2a5kunltdp3Om9HvC4F16ezPnVHASjaY9_T1Q0";
+
+const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 let sock = null;
 let state = {
   status: "disconnected", // disconnected | connecting | qr | connected
@@ -283,7 +285,14 @@ app.post("/add-number-to-bulk-groups", async (req, res) => {
       });
     }
 
-    const cleanPhone = phone.replace(/\D/g, "");
+    if (!sock || !sock.user) {
+      return res.status(400).json({
+        success: false,
+        message: "WhatsApp not connected"
+      });
+    }
+
+    const cleanPhone = String(phone).replace(/\D/g, "");
 
     const whatsappNumber = cleanPhone.startsWith("91")
       ? `${cleanPhone}@s.whatsapp.net`
@@ -293,14 +302,12 @@ app.post("/add-number-to-bulk-groups", async (req, res) => {
 
     for (const groupId of groupIds) {
       try {
-        // 1. WhatsApp group me number add
         const waResult = await sock.groupParticipantsUpdate(
           groupId,
           [whatsappNumber],
           "add"
         );
 
-        // 2. Duplicate check
         const { data: existing } = await supabase
           .from("whatsapp_members")
           .select("id")
@@ -308,7 +315,6 @@ app.post("/add-number-to-bulk-groups", async (req, res) => {
           .eq("mobile", cleanPhone)
           .maybeSingle();
 
-        // 3. Supabase me save
         if (!existing) {
           const { error: insertError } = await supabase
             .from("whatsapp_members")
@@ -329,7 +335,6 @@ app.post("/add-number-to-bulk-groups", async (req, res) => {
               message: "WhatsApp me add ho gaya, but Supabase insert failed",
               error: insertError.message
             });
-
             continue;
           }
         }
@@ -353,12 +358,91 @@ app.post("/add-number-to-bulk-groups", async (req, res) => {
       }
     }
 
-    res.json({
+    return res.json({
       success: true,
       message: "Bulk group add completed",
       phone: cleanPhone,
       results
     });
+
+  } catch (error) {
+    return res.status(500).json({
+      success: false,
+      error: error.message
+    });
+  }
+});
+
+app.post("/remove-number-from-bulk-groups", async (req, res) => {
+  try {
+    const { groupIds, phone } = req.body;
+
+    if (!groupIds || !Array.isArray(groupIds) || groupIds.length === 0 || !phone) {
+      return res.status(400).json({
+        success: false,
+        message: "groupIds array and phone required"
+      });
+    }
+
+    const cleanPhone = phone.replace(/\D/g, "");
+
+    const whatsappNumber = cleanPhone.startsWith("91")
+      ? `${cleanPhone}@s.whatsapp.net`
+      : `91${cleanPhone}@s.whatsapp.net`;
+
+    const results = [];
+
+    for (const groupId of groupIds) {
+      try {
+        const waResult = await sock.groupParticipantsUpdate(
+          groupId,
+          [whatsappNumber],
+          "remove"
+        );
+
+        const { error } = await supabase
+          .from("whatsapp_members")
+          .update({
+            is_active: false
+          })
+          .eq("wa_group_id", groupId)
+          .eq("mobile", cleanPhone);
+
+        results.push({
+          groupId,
+          success: !error,
+          message: error
+            ? "WhatsApp se remove ho gaya, Supabase update failed"
+            : "Removed successfully",
+          error: error?.message || null,
+          whatsappResult: waResult
+        });
+
+      } catch (err) {
+        results.push({
+          groupId,
+          success: false,
+          message: "Failed to remove from this group",
+          error: err.message
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: "Bulk remove completed",
+      phone: cleanPhone,
+      results
+    });
+
+  } catch (err) {
+    res.status(500).json({
+      success: false,
+      message: "Server error",
+      error: err.message
+    });
+  }
+});
 
 app.listen(PORT, () => {
   console.log(`🚀 Server on :${PORT}`);
