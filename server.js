@@ -118,13 +118,13 @@ app.post("/logout", async (_req, res) => {
 app.post("/create-group", async (req, res) => {
   let userId = req.body.user_id;
 
-  // try {
-  //   // if (!userId) {
-  //   //   return res.status(400).json({
-  //   //     success: false,
-  //   //     error: "user_id is required"
-  //   //   });
-  //   }
+  try {
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "user_id is required"
+      });
+    }
 
     if (!sock || !sock.user) {
       return res.status(400).json({
