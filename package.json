@@ -1,7 +1,8 @@
 {
+  "$schema": "http://json.schemastore.org/package",
   "name": "whatsapp-bot",
   "version": "1.0.0",
-  "main": "index.js",
+  "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "test": "echo \"Error: no test specified\" && exit 1"
@@ -11,10 +12,11 @@
   "license": "ISC",
   "description": "",
   "dependencies": {
-    "@supabase/supabase-js": "^2.106.2",
+    "@supabase/supabase-js": "^2.106.1",
     "@whiskeysockets/baileys": "^7.0.0-rc12",
-    "cors": "^2.8.6",
+    "cors": "^2.8.5",
     "express": "^5.2.1",
+    "qrcode": "^1.5.4",
     "qrcode-terminal": "^0.12.0"
   }
 }
