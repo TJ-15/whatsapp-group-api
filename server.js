@@ -18,7 +18,10 @@ const AUTH_DIR = process.env.AUTH_DIR || "./auth_info";
 const app = express();
 app.use(cors());
 app.use(express.json());
-
+const supabase = createClient(
+ SUPABASE_URL = "https://hqurzlfogskyagkiyhpi.supabase.co",
+  SUPABASE_ANON_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImhxdXJ6bGZvZ3NreWFna2l5aHBpIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzkyNzM2ODQsImV4cCI6MjA5NDg0OTY4NH0.QSvjI2a5kunltdp3Om9HvC4F16ezPnVHASjaY9_T1Q0"
+);
 let sock = null;
 let state = {
   status: "disconnected", // disconnected | connecting | qr | connected
@@ -111,23 +114,251 @@ app.post("/logout", async (_req, res) => {
 });
 
 app.post("/create-group", async (req, res) => {
-  try {
-    const { user_id, name } = req.body || {};
-    if (!user_id) return res.status(400).json({ success: false, error: "user_id required" });
-    if (!state.connected || !sock) {
-      return res.status(503).json({ success: false, error: "WhatsApp not connected" });
-    }
-    const groupName = name || `Group-${user_id.slice(0, 8)}`;
-    const me = sock.user?.id?.split(":")[0];
-    if (!me) return res.status(500).json({ success: false, error: "no self id" });
+  let userId = req.body.user_id;
 
-    const result = await sock.groupCreate(groupName, [`${me}@s.whatsapp.net`]);
-    res.json({ success: true, group_id: result.id, name: groupName });
-  } catch (e) {
-    console.error("create-group error:", e);
-    res.status(500).json({ success: false, error: e.message });
+  try {
+    if (!userId) {
+      return res.status(400).json({
+        success: false,
+        error: "user_id is required"
+      });
+    }
+
+    if (!sock || !sock.user) {
+      return res.status(400).json({
+        success: false,
+        error: "WhatsApp not connected. Please scan QR first."
+      });
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", userId)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({
+        success: false,
+        error: "User not found"
+      });
+    }
+
+    const userName = user.name || user["Full name"] || "User";
+    const phone = user.Mobile || user.mobile || user.phone;
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        error: "User phone number missing"
+      });
+    }
+
+    if (user.wa_group_created === true) {
+      return res.json({
+        success: true,
+        message: "Group already created",
+        group_id: user.wa_group_id,
+        group_name: user.wa_group_name
+      });
+    }
+
+    const { data: membersData, error: memberError } = await supabase
+      .from("whatsapp_members")
+      .select("*")
+      .eq("is_active", true);
+
+    if (memberError) {
+      console.log("Member fetch error:", memberError.message);
+    }
+
+    const teamMembers = (membersData || [])
+      .filter(member => member.mobile)
+      .map(member => {
+        const number = member.mobile.toString().replace(/\D/g, "");
+        return `91${number}@s.whatsapp.net`;
+      });
+
+    const cleanUserPhone = phone.toString().replace(/\D/g, "");
+    const userPhone = `91${cleanUserPhone}@s.whatsapp.net`;
+
+    const allMembers = [...teamMembers, userPhone];
+    const uniqueMembers = [...new Set(allMembers)];
+
+    const validParticipants = [];
+
+    for (const jid of uniqueMembers) {
+      const number = jid.split("@")[0];
+      const check = await sock.onWhatsApp(number);
+
+      if (check && check.length) {
+        validParticipants.push(jid);
+      } else {
+        console.log("❌ Invalid WhatsApp:", jid);
+      }
+    }
+
+    if (validParticipants.length < 1) {
+      return res.status(400).json({
+        success: false,
+        error: "No valid WhatsApp participants found"
+      });
+    }
+
+    const groupName = `YourEA - ${userName}`;
+
+    const group = await sock.groupCreate(groupName, validParticipants);
+
+    await sock.sendMessage(group.id, {
+      text: `Hi ${userName} 👋
+
+Welcome to YourEA!
+
+We're excited to have you onboard.
+
+This group will be used for:
+✅ Updates
+✅ Support
+✅ Communication
+
+Team YourEA 🚀`
+    });
+
+    const { error: updateError } = await supabase
+      .from("users")
+      .update({
+        wa_group_id: group.id,
+        wa_group_name: groupName,
+        wa_group_created: true,
+        wa_group_created_at: new Date().toISOString(),
+        wa_welcome_sent: true,
+        wa_last_error: null
+      })
+      .eq("id", user.id);
+
+    if (updateError) {
+      console.log("Update error:", updateError.message);
+    }
+
+    return res.json({
+      success: true,
+      message: "Group created successfully",
+      group_id: group.id,
+      group_name: groupName
+    });
+
+  } catch (err) {
+    console.log("Create group error:", err.message);
+
+    if (userId) {
+      await supabase
+        .from("users")
+        .update({
+          wa_last_error: err.message
+        })
+        .eq("id", userId);
+    }
+
+    return res.status(500).json({
+      success: false,
+      error: err.message
+    });
   }
 });
+app.post("/add-number-to-bulk-groups", async (req, res) => {
+  try {
+    const { groupIds, name, phone, user_id } = req.body;
+
+    if (!groupIds || !Array.isArray(groupIds) || groupIds.length === 0) {
+      return res.status(400).json({
+        success: false,
+        message: "groupIds array required"
+      });
+    }
+
+    if (!phone) {
+      return res.status(400).json({
+        success: false,
+        message: "phone required"
+      });
+    }
+
+    const cleanPhone = phone.replace(/\D/g, "");
+
+    const whatsappNumber = cleanPhone.startsWith("91")
+      ? `${cleanPhone}@s.whatsapp.net`
+      : `91${cleanPhone}@s.whatsapp.net`;
+
+    const results = [];
+
+    for (const groupId of groupIds) {
+      try {
+        // 1. WhatsApp group me number add
+        const waResult = await sock.groupParticipantsUpdate(
+          groupId,
+          [whatsappNumber],
+          "add"
+        );
+
+        // 2. Duplicate check
+        const { data: existing } = await supabase
+          .from("whatsapp_members")
+          .select("id")
+          .eq("wa_group_id", groupId)
+          .eq("mobile", cleanPhone)
+          .maybeSingle();
+
+        // 3. Supabase me save
+        if (!existing) {
+          const { error: insertError } = await supabase
+            .from("whatsapp_members")
+            .insert({
+              user_id: user_id || null,
+              wa_group_id: groupId,
+              name: name || null,
+              mobile: cleanPhone,
+              role: "member",
+              is_active: true,
+              added_at: new Date().toISOString()
+            });
+
+          if (insertError) {
+            results.push({
+              groupId,
+              success: false,
+              message: "WhatsApp me add ho gaya, but Supabase insert failed",
+              error: insertError.message
+            });
+
+            continue;
+          }
+        }
+
+        results.push({
+          groupId,
+          success: true,
+          message: existing
+            ? "Already saved in Supabase"
+            : "Added and saved successfully",
+          whatsappResult: waResult
+        });
+
+      } catch (error) {
+        results.push({
+          groupId,
+          success: false,
+          message: "Failed to add in this group",
+          error: error.message
+        });
+      }
+    }
+
+    res.json({
+      success: true,
+      message: "Bulk group add completed",
+      phone: cleanPhone,
+      results
+    });
 
 app.listen(PORT, () => {
   console.log(`🚀 Server on :${PORT}`);
